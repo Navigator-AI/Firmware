@@ -1,0 +1,26 @@
+# Node modules
+backend/node_modules/
+frontend/node_modules/
+
+# Build / cache
+frontend/dist/
+frontend/.parcel-cache/
+backend/tmp/
+backend/uploads/
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Env and secrets
+.env
+.env.local
+
+# VS Code
+.vscode/
