@@ -47,6 +47,55 @@ function findOffset(registers, candidates, defaultOffset){
   return defaultOffset;
 }
 
+function emitRegisterDefines(periphKey, periph, outDir){
+  if(!periph) return [];
+  const regs = (periph.regs && Array.isArray(periph.regs)) ? periph.regs : [];
+  const base = getHex(periph.base, periph.base ? periph.base : `0x40000000`);
+  if(regs.length === 0) return [];
+  const hname = `${periphKey}_regs.h`;
+  const hpath = path.join(outDir, hname);
+  let h = `#ifndef ${genHeaderGuard(periphKey + '_regs')}
+#define ${genHeaderGuard(periphKey + '_regs')}
+
+#include <stdint.h>
+
+#define ${periphKey.toUpperCase()}_BASE (${base})
+
+`;
+  regs.forEach(r => {
+    const nm = (r.name||'REG').toUpperCase().replace(/[^A-Z0-9_]/g,'_');
+    const off = r.offset || '0x00';
+    const reset = r.reset ? String(r.reset) : null;
+    const access = r.access ? String(r.access) : null;
+    h += `// ${nm}\n`;
+    if(reset || access){
+      h += `// Reset: ${reset||'n/a'}, Access: ${access||'n/a'}\n`;
+    }
+    if(Array.isArray(r.fields)){
+      r.fields.forEach(f => {
+        const fn = (f.name||'FIELD').toUpperCase().replace(/[^A-Z0-9_]/g,'_');
+        const bit = typeof f.bit === 'number' ? f.bit : parseInt(f.bit||'0',10);
+        const fdesc = (f.desc||'').replace(/\r?\n/g,' ');
+        if(fdesc) h += `// Bit ${bit}: ${fn} - ${fdesc}\n`;
+      });
+    }
+    h += `#define ${nm} (*((volatile uint32_t*)(${periphKey.toUpperCase()}_BASE + ${off})))\n`;
+    if(Array.isArray(r.fields)){
+      r.fields.forEach(f => {
+        const fn = (f.name||'FIELD').toUpperCase().replace(/[^A-Z0-9_]/g,'_');
+        const bit = typeof f.bit === 'number' ? f.bit : parseInt(f.bit||'0',10);
+        h += `#define ${nm}_${fn} (1U << ${bit})\n`;
+      });
+    }
+    h += `\n`;
+  });
+  h += `
+#endif
+`;
+  safeFile(hpath, h);
+  return [hname];
+}
+
 function generateGPIO(periph, outDir, spec){
   const hname = 'gpio.h';
   const cname = 'gpio.c';
@@ -66,11 +115,13 @@ uint8_t gpio_read(uint32_t pin);
 #endif
 `;
   const base = getHex(periph && periph.base, '0x40010000');
-  const regs = (spec && spec.registers) || [];
+  const regs = (periph && periph.regs) || (spec && spec.registers) || [];
   const dirOff = findOffset(regs, ['gpio_dir','dir','direction'], '0x00');
   const outOff = findOffset(regs, ['gpio_out','out','dataout'], '0x04');
   const inOff  = findOffset(regs, ['gpio_in','in','datain'], '0x08');
+  const defs = emitRegisterDefines('gpio', { base, regs }, outDir);
   const c = `#include "gpio.h"
+#include "gpio_regs.h"
 /* Simple register-backed GPIO driver (skeletal) */
 static volatile uint32_t *GPIO_DIR = (uint32_t*)(${base} + ${dirOff});
 static volatile uint32_t *GPIO_OUT = (uint32_t*)(${base} + ${outOff});
@@ -97,7 +148,7 @@ uint8_t gpio_read(uint32_t pin){
 `;
   safeFile(hpath, h);
   safeFile(cpath, c);
-  return [hname, cname];
+  return [hname, cname, ...defs];
 }
 
 function generateUART(periph, outDir, spec){
@@ -118,10 +169,12 @@ uint8_t uart_recv_byte(void);
 #endif
 `;
   const base = getHex(periph && periph.base, '0x40020000');
-  const regs = (spec && spec.registers) || [];
+  const regs = (periph && periph.regs) || (spec && spec.registers) || [];
   const dataOff = findOffset(regs, ['uart_data','txrx','thr','rbr','data'], '0x00');
   const statOff = findOffset(regs, ['uart_status','lsr','status'], '0x04');
+  const defs = emitRegisterDefines('uart', { base, regs }, outDir);
   const c = `#include "uart.h"
+#include "uart_regs.h"
 /* Simple polling UART driver (skeletal) */
 static volatile uint32_t *UART_DATA = (uint32_t*)(${base} + ${dataOff});
 static volatile uint32_t *UART_STATUS = (uint32_t*)(${base} + ${statOff});
@@ -141,7 +194,7 @@ uint8_t uart_recv_byte(void){
 `;
   safeFile(hpath, h);
   safeFile(cpath, c);
-  return [hname, cname];
+  return [hname, cname, ...defs];
 }
 
 function findExact(registers, exactNames){
@@ -164,20 +217,24 @@ function generateSPI(periph, outDir, spec){
 
 #include <stdint.h>
 
-void spi_init_master(void);
+void spi_init(void);
+// Back-compat for previously generated examples
+static inline void spi_init_master(void){ spi_init(); }
 uint8_t spi_transfer(uint8_t out);
 
 #endif
 `;
   const base = getHex(periph && periph.base, '0x40030000');
-  const regs = (spec && spec.registers) || [];
+  const regs = (periph && periph.regs) || (spec && spec.registers) || [];
   // Prefer exact TI-style names if present
   const offSPIDAT1 = findExact(regs, ['SPIDAT1']) || findOffset(regs, ['spidat1','spidat','spi_data','txrx','dr','data'], '0x00');
   const offSPIBUF  = findExact(regs, ['SPIBUF'])  || findOffset(regs, ['spibuf','spi_buf','status','sr'], '0x04');
   const offSPIGCR0 = findExact(regs, ['SPIGCR0']) || findOffset(regs, ['spigcr0','ctrl0','control0','gcr0'], '0x00');
   const offSPIGCR1 = findExact(regs, ['SPIGCR1']) || findOffset(regs, ['spigcr1','ctrl1','control1','gcr1'], '0x04');
   const offSPIFMT0 = findExact(regs, ['SPIFMT0']) || findOffset(regs, ['spifmt0','fmt0','format0'], '0x10');
+  const defs = emitRegisterDefines('spi', { base, regs }, outDir);
   const c = `#include "spi.h"
+#include "spi_regs.h"
 /* Simple SPI master (full duplex) skeletal */
 // Register map derived from parsed spec (fallbacks used if missing)
 static volatile uint32_t *SPIGCR0 = (uint32_t*)(${base} + ${offSPIGCR0});
@@ -186,7 +243,7 @@ static volatile uint32_t *SPIFMT0 = (uint32_t*)(${base} + ${offSPIFMT0});
 static volatile uint32_t *SPIDAT1 = (uint32_t*)(${base} + ${offSPIDAT1});
 static volatile uint32_t *SPIBUF  = (uint32_t*)(${base} + ${offSPIBUF});
 
-void spi_init_master(void){
+void spi_init(void){
   /* minimal master config; adjust per SoC */
   *SPIGCR0 = 0x00000000; // reset
   *SPIGCR1 = 0x00000001; // enable module
@@ -201,7 +258,7 @@ uint8_t spi_transfer(uint8_t out){
 `;
   safeFile(hpath, h);
   safeFile(cpath, c);
-  return [hname, cname];
+  return [hname, cname, ...defs];
 }
 
 function generateI2C(periph, outDir, spec){
@@ -221,10 +278,12 @@ int i2c_read(uint8_t addr, uint8_t *buf, uint32_t len);
 #endif
 `;
   const base = getHex(periph && periph.base, '0x40040000');
-  const regs = (spec && spec.registers) || [];
+  const regs = (periph && periph.regs) || (spec && spec.registers) || [];
   const ctrlOff = findOffset(regs, ['i2c_ctrl','control','cr'], '0x00');
   const dataOff = findOffset(regs, ['i2c_data','txrx','dr','data'], '0x04');
+  const defs = emitRegisterDefines('i2c', { base, regs }, outDir);
   const c = `#include "i2c.h"
+#include "i2c_regs.h"
 /* Simple I2C master skeletal */
 static volatile uint32_t *I2C_CTRL = (uint32_t*)(${base} + ${ctrlOff});
 static volatile uint32_t *I2C_DATA = (uint32_t*)(${base} + ${dataOff});
@@ -243,7 +302,392 @@ int i2c_read(uint8_t addr, uint8_t *buf, uint32_t len){
 `;
   safeFile(hpath, h);
   safeFile(cpath, c);
+  return [hname, cname, ...defs];
+}
+
+function generateADC(periph, outDir, spec){
+  const hname = 'adc.h';
+  const cname = 'adc.c';
+  const hpath = path.join(outDir, hname);
+  const cpath = path.join(outDir, cname);
+  const h = `#ifndef ${genHeaderGuard('adc')}
+#define ${genHeaderGuard('adc')}
+
+#include <stdint.h>
+
+void adc_init(void);
+uint16_t adc_read(uint8_t channel);
+
+#endif
+`;
+  const base = getHex(periph && periph.base, '0x40050000');
+  const regs = (spec && spec.registers) || [];
+  const ctrlOff = findOffset(regs, ['adc_ctrl','control','cr'], '0x00');
+  const chselOff = findOffset(regs, ['adc_ch','channel','chsel'], '0x04');
+  const startOff = findOffset(regs, ['adc_start','start','swtrig'], '0x08');
+  const statOff = findOffset(regs, ['adc_stat','status','sr'], '0x0C');
+  const dataOff = findOffset(regs, ['adc_data','data','dr'], '0x10');
+  const c = `#include "adc.h"
+/* Simple polling ADC skeletal */
+static volatile uint32_t *ADC_CTRL  = (uint32_t*)(${base} + ${ctrlOff});
+static volatile uint32_t *ADC_CHSEL = (uint32_t*)(${base} + ${chselOff});
+static volatile uint32_t *ADC_START = (uint32_t*)(${base} + ${startOff});
+static volatile uint32_t *ADC_STAT  = (uint32_t*)(${base} + ${statOff});
+static volatile uint32_t *ADC_DATA  = (uint32_t*)(${base} + ${dataOff});
+
+void adc_init(void){
+  *ADC_CTRL = 0x00000001; // enable
+}
+
+uint16_t adc_read(uint8_t channel){
+  *ADC_CHSEL = (uint32_t)(channel & 0xFF);
+  *ADC_START = 1u; // start conversion
+  while(((*ADC_STAT) & 0x1u) == 0u) { /* wait EOC */ }
+  return (uint16_t)(*ADC_DATA & 0x0FFF);
+}
+`;
+  safeFile(hpath, h);
+  safeFile(cpath, c);
   return [hname, cname];
+}
+
+function generateTimers(outDir){
+  const hname = 'timer.h';
+  const cname = 'timer.c';
+  const hpath = path.join(outDir, hname);
+  const cpath = path.join(outDir, cname);
+  const h = `#ifndef ${genHeaderGuard('timer')}
+#define ${genHeaderGuard('timer')}
+
+#include <stdint.h>
+
+void timer_init(void);
+void timer_start(void);
+void timer_delay_ms(uint32_t ms);
+
+#endif
+`;
+  const c = `#include "timer.h"
+#include "platform.h"
+
+void timer_init(void){
+  /* Replace with hardware timer init */
+}
+
+void timer_start(void){
+  /* Replace with starting a hardware timer */
+}
+
+void timer_delay_ms(uint32_t ms){
+  while(ms--){
+    delay_us(1000);
+  }
+}
+`;
+  safeFile(hpath, h);
+  safeFile(cpath, c);
+  return [hname, cname];
+}
+
+function generateInterruptStubs(outDir){
+  const hname = 'interrupts.h';
+  const cname = 'interrupts.c';
+  const hpath = path.join(outDir, hname);
+  const cpath = path.join(outDir, cname);
+  const h = `#ifndef INTERRUPTS_H
+#define INTERRUPTS_H
+
+#include <stdint.h>
+
+// Weakly-linked ISR prototypes (override in your application)
+void gpio_isr(void);
+void timer_isr(void);
+void gpio_isr_handler(void);
+
+#endif
+`;
+  const c = `#include "interrupts.h"
+
+__attribute__((weak)) void gpio_isr(void){
+  // GPIO interrupt handler stub
+}
+
+__attribute__((weak)) void timer_isr(void){
+  // Timer interrupt handler stub
+}
+
+// Additional weak handler that user code can override and call from gpio_isr
+__attribute__((weak)) void gpio_isr_handler(void){
+  // User can override in application to handle button/LED toggle
+}
+`;
+  safeFile(hpath, h);
+  safeFile(cpath, c);
+  return [hname, cname];
+}
+
+function generateDebug(outDir){
+  const hname = 'debug.h';
+  const cname = 'debug.c';
+  const hpath = path.join(outDir, hname);
+  const cpath = path.join(outDir, cname);
+  const h = `#ifndef DEBUG_H
+#define DEBUG_H
+
+#include <stdint.h>
+#include "uart.h"
+
+void uart_send_string(const char *s);
+void uart_send_hex8(uint8_t v);
+void uart_send_hex16(uint16_t v);
+void uart_send_uint(uint32_t v);
+
+#define DBG_PRINT(msg) uart_send_string(msg)
+
+#endif
+`;
+  const c = `#include "debug.h"
+
+void uart_send_string(const char *s){
+  if(!s) return;
+  for(const char *p = s; *p; ++p){
+    uart_send_byte((uint8_t)*p);
+  }
+}
+
+static const char HEX_CHARS[16] = {
+  '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F'
+};
+
+void uart_send_hex8(uint8_t v){
+  uart_send_byte((uint8_t)HEX_CHARS[(v>>4)&0xF]);
+  uart_send_byte((uint8_t)HEX_CHARS[v&0xF]);
+}
+void uart_send_hex16(uint16_t v){
+  uart_send_hex8((uint8_t)(v>>8));
+  uart_send_hex8((uint8_t)(v&0xFF));
+}
+void uart_send_uint(uint32_t v){
+  char buf[11];
+  int i = 0;
+  if(v == 0){ uart_send_byte('0'); return; }
+  while(v && i < (int)sizeof(buf)){
+    uint32_t q = v / 10u;
+    uint32_t r = v - q*10u;
+    buf[i++] = (char)('0' + r);
+    v = q;
+  }
+  while(i-- > 0){ uart_send_byte((uint8_t)buf[i]); }
+}
+`;
+  safeFile(hpath, h);
+  safeFile(cpath, c);
+  return [hname, cname];
+}
+
+function generateMain(outDir, opts){
+  const cname = 'main.c';
+  const cpath = path.join(outDir, cname);
+  const demo = (opts && opts.demo) || '';
+  const wantBlink = demo === 'led_blink' || demo === '';
+  const wantEcho = demo === 'uart_echo' || demo === '';
+  const wantAdc  = demo === 'adc_read'  || demo === 'adc_debug' || demo === '';
+  const wantSpi  = demo === 'spi_byte';
+  const wantI2c  = demo === 'i2c_temp';
+  const wantSM   = demo === 'state_machine';
+  const wantPWM  = demo === 'pwm_control';
+  const wantGPIOInt = demo === 'gpio_interrupt';
+  const wantStruct  = demo === 'struct_demo';
+  const wantBitops  = demo === 'bitops_demo';
+  const c = `#include <stdint.h>
+#include "board.h"
+#include "platform.h"
+#include "timer.h"
+#include "gpio.h"
+#include "uart.h"
+#include "adc.h"
+#include "debug.h"
+#include "spi.h"
+#include "i2c.h"
+#include "interrupts.h"
+#include "constants.h"
+#include "bitops.h"
+
+typedef struct {
+  uint8_t pin;
+  uint8_t direction; // 0=input, 1=output
+} gpio_config_t;
+
+static void blink_demo(void){
+  gpio_init();
+  gpio_set_dir(LED_PIN, 1);
+  while(1){
+    gpio_write(LED_PIN, 1);
+    timer_delay_ms(LED_DELAY_MS);
+    gpio_write(LED_PIN, 0);
+    timer_delay_ms(LED_DELAY_MS);
+    break; // run once in demo
+  }
+}
+
+static void button_toggle_demo(void){
+  gpio_set_dir(BUTTON_PIN, 0);
+  gpio_set_dir(LED_PIN, 1);
+  uint8_t last = gpio_read(BUTTON_PIN);
+  for(int i=0;i<50;i++){
+    uint8_t now = gpio_read(BUTTON_PIN);
+    if(now && !last){
+      uint8_t v = gpio_read(LED_PIN);
+      gpio_write(LED_PIN, !v);
+    }
+    last = now;
+    timer_delay_ms(20);
+  }
+}
+
+static void uart_echo_demo(void){
+  uart_init(115200);
+  DBG_PRINT("UART echo demo\n");
+  // echo 8 bytes then return
+  for(int i=0;i<8;i++){
+    uint8_t b = uart_recv_byte();
+    uart_send_byte(b);
+  }
+}
+
+static void adc_print_demo(void){
+  adc_init();
+  DBG_PRINT("ADC read demo\n");
+  // simple binary print over UART of channel 0 value (twice)
+  for(int i=0;i<2;i++){
+    uint16_t v = adc_read(0);
+    uart_send_byte((uint8_t)(v >> 8));
+    uart_send_byte((uint8_t)(v & 0xFF));
+    timer_delay_ms(10);
+  }
+}
+
+static void adc_debug_demo(void){
+  adc_init();
+  uart_init(115200);
+  DBG_PRINT("ADC debug values: ");
+  for(int i=0;i<5;i++){
+    uint16_t v = adc_read(0);
+    uart_send_uint((uint32_t)v);
+    DBG_PRINT(i<4?", ":"\n");
+    timer_delay_ms(50);
+  }
+}
+
+static void spi_demo(void){
+  spi_init();
+  uart_init(115200);
+  DBG_PRINT("SPI xfer 0xA5 -> 0x");
+  uint8_t r = spi_transfer(0xA5);
+  uart_send_hex8(r);
+  DBG_PRINT("\n");
+}
+
+static void i2c_temp_demo(void){
+  i2c_init();
+  uart_init(115200);
+  DBG_PRINT("I2C temp mock read: 0x");
+  uint8_t buf[2] = {0,0};
+  (void)i2c_read(0x48, buf, 2);
+  uart_send_hex8(buf[0]);
+  uart_send_hex8(buf[1]);
+  DBG_PRINT("\n");
+}
+
+static void state_machine_demo(void){
+  gpio_init();
+  gpio_set_dir(LED_PIN,1);
+  led_state_t state = LED_OFF;
+  for(int i=0;i<20;i++){
+    switch(state){
+      case LED_OFF: gpio_write(LED_PIN,0); state = LED_ON; break;
+      case LED_ON:  gpio_write(LED_PIN,1); state = LED_OFF; break;
+      default: gpio_write(LED_PIN,0); state = LED_OFF; break;
+    }
+    timer_delay_ms(100);
+  }
+}
+
+static void pwm_control_demo(void){
+  gpio_init();
+  gpio_set_dir(LED_PIN,1);
+  // very rough software PWM demo
+  for(int duty=0; duty<=100; duty+=10){
+    for(int c=0;c<50;c++){
+      int on_us = duty * 100; // 10ms period
+      int off_us = (100-duty) * 100;
+      gpio_write(LED_PIN,1); delay_us((uint32_t)on_us);
+      gpio_write(LED_PIN,0); delay_us((uint32_t)off_us);
+    }
+  }
+}
+
+static volatile uint8_t g_led_state = 0;
+void gpio_isr_handler(void){
+  // toggle LED on interrupt
+  g_led_state ^= 1u;
+  gpio_write(LED_PIN, g_led_state);
+}
+
+static void gpio_interrupt_demo(void){
+  gpio_init();
+  gpio_set_dir(BUTTON_PIN, 0);
+  gpio_set_dir(LED_PIN, 1);
+  // In real HW you'd configure edge triggers and enable the NVIC/IRQ here.
+  // This demo simply calls the handler as if an interrupt occurred.
+  DBG_PRINT("GPIO interrupt demo (simulated)\n");
+  for(int i=0;i<3;i++){
+    gpio_isr_handler();
+    timer_delay_ms(200);
+  }
+}
+
+static void struct_demo(void){
+  gpio_config_t cfg = { LED_PIN, 1 };
+  gpio_init();
+  gpio_set_dir(cfg.pin, cfg.direction);
+  gpio_write(cfg.pin, 1);
+  timer_delay_ms(LED_DELAY_MS);
+  gpio_write(cfg.pin, 0);
+}
+
+static void bitops_demo(void){
+  static volatile uint32_t fake_reg = 0;
+  // use TOGGLE_BIT to simulate LED toggling
+  for(int i=0;i<4;i++){
+    TOGGLE_BIT(fake_reg, 0);
+    uint8_t v = (uint8_t)READ_BIT(fake_reg, 0);
+    gpio_write(LED_PIN, v);
+    timer_delay_ms(LED_DELAY_MS/2);
+  }
+}
+
+int main(void){
+  timer_init();
+  timer_start();
+  if(${wantBlink ? '1' : '0'}){ DBG_PRINT("Blink demo\n"); blink_demo(); }
+  if(${demo === '' ? '1' : '0'}){ button_toggle_demo(); }
+  if(${wantEcho ? '1' : '0'}){ uart_echo_demo(); }
+  if(${wantAdc && demo !== 'adc_debug' ? '1' : '0'}){ adc_print_demo(); }
+  if(${demo === 'adc_debug' ? '1' : '0'}){ adc_debug_demo(); }
+  if(${wantSpi ? '1' : '0'}){ spi_demo(); }
+  if(${wantI2c ? '1' : '0'}){ i2c_temp_demo(); }
+  if(${wantSM ? '1' : '0'}){ state_machine_demo(); }
+  if(${wantPWM ? '1' : '0'}){ pwm_control_demo(); }
+  if(${wantGPIOInt ? '1' : '0'}){ gpio_interrupt_demo(); }
+  if(${wantStruct ? '1' : '0'}){ struct_demo(); }
+  if(${wantBitops ? '1' : '0'}){ bitops_demo(); }
+  while(1){}
+  return 0;
+}
+`;
+  safeFile(cpath, c);
+  return [cname];
 }
 
 function generateBoardConfig(outDir){
@@ -259,6 +703,43 @@ function generateBoardConfig(outDir){
 #define GPIO_MOSI_PIN 3
 #define GPIO_MISO_PIN 4
 #define GPIO_CS_PIN 5
+
+// Application pins
+#define LED_PIN 0
+#define BUTTON_PIN 1
+
+#endif
+`;
+  safeFile(hpath, h);
+  return [hname];
+}
+
+function generateConstants(outDir){
+  const hname = 'constants.h';
+  const hpath = path.join(outDir, hname);
+  const h = `#ifndef CONSTANTS_H
+#define CONSTANTS_H
+
+#define LED_DELAY_MS 1000
+
+typedef enum { LED_OFF = 0, LED_ON = 1, LED_BLINK = 2 } led_state_t;
+
+#endif
+`;
+  safeFile(hpath, h);
+  return [hname];
+}
+
+function generateBitops(outDir){
+  const hname = 'bitops.h';
+  const hpath = path.join(outDir, hname);
+  const h = `#ifndef BITOPS_H
+#define BITOPS_H
+
+#define SET_BIT(REG, BIT)    ((REG) |= (1U << (BIT)))
+#define CLEAR_BIT(REG, BIT)  ((REG) &= ~(1U << (BIT)))
+#define TOGGLE_BIT(REG, BIT) ((REG) ^= (1U << (BIT)))
+#define READ_BIT(REG, BIT)   (((REG) >> (BIT)) & 1U)
 
 #endif
 `;
@@ -699,7 +1180,7 @@ void app_run(void){
 /**
  * generateFromSpec: main entry
  */
-function generateFromSpec(spec, outDir){
+function generateFromSpec(spec, outDir, opts){
   // spec normalization
   const peripherals = (spec.peripherals || spec.periph || {});
   const filesCreated = [];
@@ -734,6 +1215,20 @@ Please review addresses and register offsets before use.
     filesCreated.push(...generateSoftGPIO(outDir));
     filesCreated.push(...generateSoftI2C(outDir));
   }
+  // Timers and interrupt stubs are useful across many projects; always include
+  filesCreated.push(...generateTimers(outDir));
+  filesCreated.push(...generateInterruptStubs(outDir));
+  // Debug utilities for UART logging
+  filesCreated.push(...generateDebug(outDir));
+  // Constants and bit operations
+  filesCreated.push(...generateConstants(outDir));
+  filesCreated.push(...generateBitops(outDir));
+
+  // ADC: include if specified or hinted in name
+  if(peripherals.adc || /\badc\b/i.test(spec.name||'')){
+    const al = generateADC(peripherals.adc || {}, outDir, spec);
+    filesCreated.push(...al);
+  }
 
   // If the name hints a specific device, add a high-level driver
   const name = (spec && spec.name || '').toLowerCase();
@@ -753,6 +1248,18 @@ Please review addresses and register offsets before use.
     const tl = generateTransistorExamples(spec, outDir);
     filesCreated.push(...tl);
   }
+
+  // Create application entry with demos based on detected peripherals
+  const perFlags = {
+    gpio: !!peripherals.gpio,
+    uart: !!peripherals.uart,
+    spi:  !!peripherals.spi,
+    i2c:  !!peripherals.i2c,
+    adc:  !!peripherals.adc,
+    timer: true,
+    interrupts: true,
+  };
+  filesCreated.push(...generateMain(outDir, { peripherals: perFlags }));
 
   // If registers exist, create a registers.h (skip trivial placeholders and analog parts)
   if(spec.registers && Array.isArray(spec.registers)){

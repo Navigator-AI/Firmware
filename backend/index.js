@@ -123,10 +123,12 @@ function extractRegsAndBases(text, nameHint){
   if(spec.peripherals.spi){ const b = findNearbyBase('spi'); if(b) spec.peripherals.spi.base = b; }
   if(spec.peripherals.uart){ const b = findNearbyBase('uart'); if(b) spec.peripherals.uart.base = b; }
   if(spec.peripherals.gpio){ const b = findNearbyBase('gpio'); if(b) spec.peripherals.gpio.base = b; }
+  if(/\badc\b/.test(lower)){ spec.peripherals.adc = spec.peripherals.adc || {}; const b = findNearbyBase('adc'); if(b) spec.peripherals.adc.base = b; }
 
   // Extract register name + offset pairs from lines (single-line patterns)
   const lines = (text||'').split(/\r?\n/);
   const candidates = [];
+  const regMeta = {}; // name -> { reset, access, desc, fields: [] }
   for(const ln of lines){
     const m2 = ln.match(/\b([A-Za-z][A-Za-z0-9_]{1,})\b[^\n]{0,24}\b(?:offset|addr(?:ess)?)\b[^\n]{0,6}\b(0x[0-9A-Fa-f]+)\b/i);
     const m1 = ln.match(/\b([A-Za-z][A-Za-z0-9_]{1,})\b[^\n]{0,16}\b(0x[0-9A-Fa-f]+)\b/);
@@ -138,12 +140,33 @@ function extractRegsAndBases(text, nameHint){
         candidates.push({ name: regName, offset: off });
       }
     }
+    // Capture reset/access patterns on same line
+    const mra = ln.match(/\breset\b[^0-9A-Fa-f]{0,16}(0x[0-9A-Fa-f]+)/i);
+    const mac = ln.match(/\baccess\b[^A-Za-z]{0,6}([A-Z\/]{1,6})/);
+    if(m && (mra || mac)){
+      const key = m[1];
+      regMeta[key] = regMeta[key] || { fields: [] };
+      if(mra) regMeta[key].reset = mra[1];
+      if(mac) regMeta[key].access = mac[1];
+    }
     // Try table-like rows: NAME 0xXX ... comment
     const mt = ln.match(/^\s*([A-Za-z][A-Za-z0-9_]{1,})\s+\(?(0x[0-9A-Fa-f]+)\)?/);
     if(mt){
       const rn = mt[1];
       const of = mt[2];
       candidates.push({ name: rn, offset: of });
+    }
+    // Bitfield lines: REG[bit] = NAME or REG.bit: NAME - DESC
+    const bf1 = ln.match(/\b([A-Za-z][A-Za-z0-9_]{1,})\s*\[\s*(\d+)\s*\]\s*[:=]\s*([A-Za-z0-9_]+)(?:\s*-\s*(.*))?/);
+    const bf2 = ln.match(/\b([A-Za-z][A-Za-z0-9_]{1,})\.(\d+)\s*[:=]\s*([A-Za-z0-9_]+)(?:\s*-\s*(.*))?/);
+    const bfm = bf1 || bf2;
+    if(bfm){
+      const rname = bfm[1];
+      const bit = parseInt(bfm[2], 10);
+      const fname = bfm[3];
+      const desc = (bfm[4]||'').trim();
+      regMeta[rname] = regMeta[rname] || { fields: [] };
+      regMeta[rname].fields.push({ name: fname, bit, desc });
     }
   }
 
@@ -165,18 +188,41 @@ function extractRegsAndBases(text, nameHint){
       if(m2){ candidates.push({ name: m2[1], offset: m2[2] }); continue; }
     }
   }
+  // Bucket registers by peripheral keyword
+  const periphRegs = { gpio: [], uart: [], spi: [], i2c: [], adc: [], timer: [] };
   const seen = new Set();
+  function bucketForName(name){
+    const n = (name||'').toLowerCase();
+    if(/\bgpio\b|gpio_/.test(n)) return 'gpio';
+    if(/\buart\b|thr|rbr|lsr/.test(n)) return 'uart';
+    if(/\bspi\b|spigcr|spibuf|spidat/.test(n)) return 'spi';
+    if(/\bi2c\b|iic_?/.test(n)) return 'i2c';
+    if(/\badc\b/.test(n)) return 'adc';
+    if(/\btim\b|timer|tick/.test(n)) return 'timer';
+    return null;
+  }
   for(const r of candidates){
-    const key = r.name.toLowerCase();
+    const key = (r.name||'').toLowerCase();
+    if(!key) continue;
     if(!seen.has(key)){
-      spec.registers.push(r);
+      const meta = regMeta[r.name] || {};
+      spec.registers.push({ name: r.name, offset: r.offset, fields: meta.fields||[], reset: meta.reset, access: meta.access });
+      const b = bucketForName(r.name);
+      if(b){ periphRegs[b].push({ name: r.name, offset: r.offset, fields: meta.fields||[], reset: meta.reset, access: meta.access }); }
       seen.add(key);
     }
-    if(spec.registers.length >= 64) break;
+    if(spec.registers.length >= 128) break;
   }
   if(spec.registers.length === 0){
     spec.registers = [ { name: 'CTRL', offset: '0x00' }, { name: 'DATA', offset: '0x04' } ];
   }
+  // Attach per-peripheral regs
+  Object.keys(periphRegs).forEach((k)=>{
+    if(periphRegs[k].length){
+      spec.peripherals[k] = spec.peripherals[k] || {};
+      spec.peripherals[k].regs = periphRegs[k];
+    }
+  });
   return spec;
 }
 
@@ -387,10 +433,9 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
         }catch(e){ reason = 'regex_error'; }
       }
 
-      // 4) Heuristic filename/text fallback (last resort)
+      // 4) For PDFs, do NOT rely on filename heuristics. Require actual parsed content.
       if(!parsedSpec){
-        parsedSpec = inferSpecFromText(textContent, file.originalname);
-        if(!parsedSpec) reason = reason || 'no_keywords_found';
+        reason = reason || 'no_parsed_spec';
       }
 
       // attach meta for client visibility
@@ -403,13 +448,15 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
         parsedSpec = inferSpecFromText(textContent, file.originalname);
       }
 
-      // Strict validation: if it doesn't look like a firmware datasheet and we only inferred heuristically, stop
+      // Strict validation: require firmware-like content AND meaningful extracted data
       const looksFirmware = isFirmwareText(textContent);
-      const hasRegisters = parsedSpec && parsedSpec.registers && Array.isArray(parsedSpec.registers) && parsedSpec.registers.length >= 2;
-      const hasPeripherals = parsedSpec && parsedSpec.peripherals && Object.keys(parsedSpec.peripherals).length > 0;
-      if(!looksFirmware && req._genMeta.source === 'heuristic' && !hasRegisters){
+      const hasRegisters = parsedSpec && parsedSpec.registers && Array.isArray(parsedSpec.registers) && parsedSpec.registers.length >= 1;
+      const per = parsedSpec && parsedSpec.peripherals || {};
+      const perKeys = Object.keys(per);
+      const perHasRegsOrBase = perKeys.some(k => (per[k] && ((Array.isArray(per[k].regs) && per[k].regs.length>0) || !!per[k].base)));
+      if(!(looksFirmware && (hasRegisters || perHasRegsOrBase))){
         cleanFile(file.path);
-        return res.status(400).json({ error: 'The document does not appear to be a firmware/peripheral datasheet. No registers or machine-readable spec were found.' , meta: req._genMeta });
+        return res.status(400).json({ error: 'The document does not appear to be a firmware/peripheral datasheet or lacks machine-readable registers/bases.' , meta: req._genMeta });
       }
     } else if(ext === '.json' || ext === '.yaml' || ext === '.yml' || ext === '.xml'){
       textContent = fs.readFileSync(file.path, 'utf8');
@@ -449,7 +496,7 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
     // Generate code files in a temporary folder
     const tmpDir = path.join(__dirname, 'tmp', Date.now().toString());
     fs.mkdirSync(tmpDir, { recursive: true });
-    const generatedFiles = generateFromSpec(parsedSpec, tmpDir);
+    const generatedFiles = generateFromSpec(parsedSpec, tmpDir, {});
 
     // If client requests JSON, return generated files inline for preview
     if ((req.query && req.query.format === 'json')){
