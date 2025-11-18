@@ -1,0 +1,5 @@
+4
+71C:\Users\seai_\OneDrive\Desktop\firmware\frontend\src\package-lock.json134036197276415573 0
+61C:\Users\seai_\OneDrive\Desktop\firmware\frontend\src\app.jsx134057592986209321 0
+64C:\Users\seai_\OneDrive\Desktop\firmware\frontend\src\index.html134032778220537344 0
+63C:\Users\seai_\OneDrive\Desktop\firmware\frontend\src\index.jsx134030798434753493 0

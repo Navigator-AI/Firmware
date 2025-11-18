@@ -8,6 +8,7 @@ const xml2js = require('xml2js');
 const archiver = require('archiver');
 const cors = require('cors');
 const { generateFromSpec } = require('./generator');
+const { spawn } = require('child_process');
 const pdfjsLib = (()=>{ try{ return require('pdfjs-dist'); }catch(_){ return null; } })();
 // Optional local LLM via Ollama (no cloud). If not installed, we fall back.
 let axios = null;
@@ -104,6 +105,48 @@ function extractRegsAndBases(text, nameHint){
   if(/\bspi\b/.test(lower)) spec.peripherals.spi = {};
   if(/\bi2c\b/.test(lower)) spec.peripherals.i2c = {};
   if(/\bgpio\b/.test(lower)) spec.peripherals.gpio = spec.peripherals.gpio || { pins: 32 };
+  // UART specifics: try to extract baud rate and TX/RX pins from free text
+  if(spec.peripherals.uart){
+    // Baud rate patterns (e.g., "baud rate 115200", "115200 bps", "baud: 9600")
+    let baud = null;
+    const baudRegexes = [
+      /\bbaud(?:\s*rate)?\b[^0-9]{0,10}(\d{4,7})/i,
+      /(\d{4,7})\s*(?:bps|baud)\b/i,
+      /\bdefault\s*baud\b[^0-9]{0,10}(\d{4,7})/i
+    ];
+    for(const rx of baudRegexes){
+      const m = lower.match(rx);
+      if(m && m[1]){ baud = parseInt(m[1], 10); break; }
+    }
+    // TX/RX pin patterns (e.g., "TXD = GPIO17", "RX -> 16", "TXD0: 1", "TX on pin 17")
+    let txPin = null, rxPin = null;
+    const pinPatterns = [
+      /\btxd?\b[^0-9a-z]{0,8}(?:gpio\s*)?(\d{1,3})/i,
+      /\brxd?\b[^0-9a-z]{0,8}(?:gpio\s*)?(\d{1,3})/i,
+    ];
+    // Scan line-by-line to correlate TX/RX separately
+    const lines = (text||'').split(/\r?\n/);
+    for(const ln of lines){
+      const l = ln.toLowerCase();
+      const mtx = l.match(/\btxd?\b[^0-9a-z]{0,12}(?:gpio\s*)?(\d{1,3})/i);
+      const mrx = l.match(/\brxd?\b[^0-9a-z]{0,12}(?:gpio\s*)?(\d{1,3})/i);
+      if(!txPin && mtx && mtx[1]) txPin = parseInt(mtx[1],10);
+      if(!rxPin && mrx && mrx[1]) rxPin = parseInt(mrx[1],10);
+      if(txPin!=null && rxPin!=null) break;
+    }
+    // As a fallback, look for combined mapping like "RX=16, TX=17"
+    if(rxPin==null){ const m = lower.match(/rx\s*[=:>\-]\s*(\d{1,3})/i); if(m) rxPin = parseInt(m[1],10); }
+    if(txPin==null){ const m = lower.match(/tx\s*[=:>\-]\s*(\d{1,3})/i); if(m) txPin = parseInt(m[1],10); }
+    // Persist if found
+    if(baud){
+      spec.peripherals.uart.instances = [{ name: 'UART0', baud }];
+    }
+    if(txPin!=null || rxPin!=null){
+      spec.peripherals.uart.pins = {};
+      if(txPin!=null) spec.peripherals.uart.pins.tx = txPin;
+      if(rxPin!=null) spec.peripherals.uart.pins.rx = rxPin;
+    }
+  }
   // Device-type classifier: analog vs digital hints
   const looksAnalog = /(transistor|pnp|npn|bjt|op-amp|opamp|analog)/.test(lower);
   if(looksAnalog){
@@ -389,6 +432,68 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
       if(data){
         textContent = data.text || '';
       }
+      // If PDF text is likely image-based, try pdftotext as a fallback extractor
+      if(!textContent || textContent.trim().length < 20){
+        try{
+          const { spawnSync } = require('child_process');
+          const pt = spawnSync('pdftotext', [file.path, '-'], { encoding: 'utf8' });
+          if(pt && pt.stdout && pt.stdout.trim().length > 0){
+            textContent = pt.stdout;
+            req._genMeta = req._genMeta || {};
+            req._genMeta.pdftotext = true;
+          }
+        }catch(_){}
+      }
+      // New: Try Python table extractor first for accurate register maps
+      try{
+        const tmpDir = path.join(__dirname, 'tmp', `parse_${Date.now()}`);
+        fs.mkdirSync(tmpDir, { recursive: true });
+        const outJson = path.join(tmpDir, 'register_map.json');
+        const py = spawn(process.env.PYTHON || 'python', [path.join(__dirname, 'parse_pdf_registers.py'), '--in', file.path, '--out', outJson], { stdio: ['ignore','pipe','pipe'] });
+        let pyStdout = '';
+        let pyStderr = '';
+        await new Promise((resolve) => {
+          py.stdout.on('data', (d)=>{ pyStdout += d.toString(); });
+          py.stderr.on('data', (d)=>{ pyStderr += d.toString(); });
+          py.on('close', ()=> resolve());
+        });
+        let parsedFromPython = null;
+        try{
+          if(fs.existsSync(outJson)){
+            const s = JSON.parse(fs.readFileSync(outJson, 'utf8'));
+            if(s && typeof s === 'object') parsedFromPython = s;
+          }
+        }catch(_){ parsedFromPython = null; }
+        if(parsedFromPython){
+          // Convert Python output shape to internal spec
+          const periphMap = {};
+          const regList = [];
+          const perKeys = Object.keys(parsedFromPython||{});
+          for(const k of perKeys){
+            const arr = Array.isArray(parsedFromPython[k]) ? parsedFromPython[k] : [];
+            const regs = [];
+            for(const r of arr){
+              if(!r || !r.name || !r.address) continue;
+              const addr = String(r.address);
+              regs.push({ name: r.name, offset: addr, address: addr, fields: r.fields||[], desc: r.desc });
+              regList.push({ name: r.name, offset: addr, address: addr, fields: r.fields||[], desc: r.desc });
+            }
+            if(regs.length){ periphMap[k.toLowerCase()] = { regs }; }
+          }
+          parsedSpec = { name: (file.originalname||'ip').replace(/\.[^/.]+$/, ''), peripherals: periphMap, registers: regList };
+          req._genMeta = req._genMeta || {};
+          req._genMeta.source = 'python_tables';
+        } else if(pyStderr){
+          // keep going with other strategies
+          req._genMeta = req._genMeta || {};
+          req._genMeta.python_error = pyStderr.slice(0, 4000);
+        }
+        try{ fs.rmSync(tmpDir, { recursive: true, force: true }); }catch(_){}
+      }catch(e){
+        // non-fatal; continue to existing fallbacks
+        req._genMeta = req._genMeta || {};
+        req._genMeta.python_error = (e && e.message) || 'python_spawn_failed';
+      }
       let source = 'heuristic';
       let reason = '';
       const llmRequested = !!(req.query && req.query.llm === 'ollama');
@@ -448,15 +553,28 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
         parsedSpec = inferSpecFromText(textContent, file.originalname);
       }
 
-      // Strict validation: require firmware-like content AND meaningful extracted data
+      // Validation: accept if we have meaningful structured data, even if PDF text is image-only
       const looksFirmware = isFirmwareText(textContent);
       const hasRegisters = parsedSpec && parsedSpec.registers && Array.isArray(parsedSpec.registers) && parsedSpec.registers.length >= 1;
       const per = parsedSpec && parsedSpec.peripherals || {};
       const perKeys = Object.keys(per);
       const perHasRegsOrBase = perKeys.some(k => (per[k] && ((Array.isArray(per[k].regs) && per[k].regs.length>0) || !!per[k].base)));
-      if(!(looksFirmware && (hasRegisters || perHasRegsOrBase))){
+      const extractedStructured = !!(req._genMeta && req._genMeta.source === 'python_tables');
+      // If python extracted any peripheral buckets, accept even if regs missing
+      const okByStructure = (hasRegisters || perHasRegsOrBase || (extractedStructured && perKeys.length > 0));
+      // Consider structural success as sufficient content for acceptance
+      const okByContent = looksFirmware || extractedStructured || okByStructure;
+      // Allow manual override for debugging
+      const forceAccept = (req.query && String(req.query.force||'').toLowerCase() === 'true');
+      if(!forceAccept && !(okByContent && okByStructure)){
         cleanFile(file.path);
-        return res.status(400).json({ error: 'The document does not appear to be a firmware/peripheral datasheet or lacks machine-readable registers/bases.' , meta: req._genMeta });
+        const meta = Object.assign({}, req._genMeta||{}, {
+          looksFirmware,
+          hasRegisters,
+          perKeys,
+          perHasRegsOrBase,
+        });
+        return res.status(400).json({ error: 'The document does not appear to be a firmware/peripheral datasheet or lacks machine-readable registers/bases.', meta });
       }
     } else if(ext === '.json' || ext === '.yaml' || ext === '.yml' || ext === '.xml'){
       textContent = fs.readFileSync(file.path, 'utf8');
@@ -496,6 +614,8 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
     // Generate code files in a temporary folder
     const tmpDir = path.join(__dirname, 'tmp', Date.now().toString());
     fs.mkdirSync(tmpDir, { recursive: true });
+    // Attach raw text and analyzed context so generator can reason from keywords
+    try { parsedSpec._text = textContent || ''; } catch(_) {}
     const generatedFiles = generateFromSpec(parsedSpec, tmpDir, {});
 
     // If client requests JSON, return generated files inline for preview

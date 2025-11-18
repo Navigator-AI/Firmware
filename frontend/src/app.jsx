@@ -11,6 +11,8 @@ export default function App(){
   const [message, setMessage] = useState('');
   const [downloading, setDownloading] = useState(false);
   const [model, setModel] = useState('llama3.1');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null);
 
   function onFileChange(e){
     const selected = e.target.files && e.target.files[0];
@@ -18,8 +20,9 @@ export default function App(){
     setFile(selected);
     setMessage('');
     setPreview(null); // clear previous preview when selecting a new file
-    // Immediately upload using current demo selection
-    upload(selected);
+    // Ask user to confirm before uploading in an in-app modal
+    setPendingFile(selected);
+    setConfirmOpen(true);
     // Allow re-selecting the same file by resetting the input value
     e.target.value = '';
   }
@@ -30,9 +33,6 @@ export default function App(){
       setMessage('Choose a file first');
       return;
     }
-    // show popup confirmation
-    const ok = window.confirm('Datasheet must be firmware-related (registers, UART/I2C/SPI/GPIO). Proceed?');
-    if(!ok) return;
 
     const fd = new FormData();
     fd.append('datasheet', selectedFile);
@@ -94,6 +94,18 @@ export default function App(){
 
   const [preview, setPreview] = useState(null);
 
+  function handleConfirmProceed(){
+    const toUpload = pendingFile;
+    setConfirmOpen(false);
+    setPendingFile(null);
+    if(toUpload) upload(toUpload);
+  }
+
+  function handleConfirmCancel(){
+    setConfirmOpen(false);
+    setPendingFile(null);
+  }
+
   // Ensure page background stays white when scrolling
   useEffect(() => {
     const prevBg = document.body.style.backgroundColor;
@@ -108,19 +120,59 @@ export default function App(){
 
   function downloadZipFromPreview(){
     if(!preview || !Array.isArray(preview)) return;
-    // Build a zip on the client
+    
+    // Combine all code into a single consolidated file
+    const deviceName = (file && file.name) ? file.name.replace(/\.[^/.]+$/, '') : 'firmware';
+    const consolidatedFileName = `${deviceName}_generated.c`;
+    
+    let consolidatedContent = `/*
+ * Generated firmware drivers for ${deviceName}
+ * This is a consolidated file containing all generated code
+ * Generated on: ${new Date().toISOString()}
+ */
+
+#ifndef ${deviceName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_H
+#define ${deviceName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_H
+
+#include <stdint.h>
+
+// ============================================================================
+// CONSOLIDATED FIRMWARE CODE
+// ============================================================================
+
+`;
+
+    // Add all the code from different files into one consolidated file
+    preview.forEach(f => {
+      if(f.name && f.content) {
+        // Add section header for each file
+        consolidatedContent += `// ============================================================================
+// ${f.name.toUpperCase()}
+// ============================================================================
+
+`;
+        // Add the file content
+        consolidatedContent += f.content;
+        consolidatedContent += `\n\n`;
+      }
+    });
+
+    consolidatedContent += `#endif // ${deviceName.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_H
+`;
+
+    // Build a zip with just the single consolidated file
     import('jszip')
       .then((mod) => mod && (mod.default || mod))
       .then((JSZipLib) => {
         const zip = new JSZipLib();
-        preview.forEach(f => zip.file(f.name, f.content||''));
+        zip.file(consolidatedFileName, consolidatedContent);
         return zip.generateAsync({type:'blob'});
       })
       .then((blob) => {
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = (((file && file.name) ? file.name.replace(/\.[^/.]+$/, '') : 'fw')) + '_generated.zip';
+        a.download = `${deviceName}_generated.zip`;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -201,6 +253,23 @@ export default function App(){
 
         {/* usage notes removed per request */}
       </div>
+
+      {confirmOpen && (
+        <div style={{position:'fixed', inset:0, background:'rgba(0,0,0,0.45)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:50}}>
+          <div style={{width:'min(520px, 92vw)', background:'#fff', color:'#1a202c', borderRadius:12, boxShadow:'0 20px 50px rgba(0,0,0,0.25)', overflow:'hidden'}}>
+            <div style={{padding:'20px 22px', borderBottom:'1px solid #edf2f7'}}>
+              <div style={{fontSize:18, fontWeight:700}}>Proceed with upload?</div>
+            </div>
+            <div style={{padding:'18px 22px', lineHeight:1.5}}>
+              Datasheet must be firmware-related (registers, UART/I2C/SPI/GPIO).
+            </div>
+            <div style={{display:'flex', justifyContent:'flex-end', gap:10, padding:'14px 16px', background:'#f7fafc', borderTop:'1px solid #edf2f7'}}>
+              <button onClick={handleConfirmCancel} style={{padding:'10px 16px', background:'#e2e8f0', color:'#1a202c', border:'none', borderRadius:8}}>Cancel</button>
+              <button onClick={handleConfirmProceed} style={{padding:'10px 16px', background:'#6b46c1', color:'#fff', border:'none', borderRadius:8}}>OK</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
