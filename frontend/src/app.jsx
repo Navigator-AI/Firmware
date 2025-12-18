@@ -10,7 +10,7 @@ export default function App(){
   const fileInputRef = useRef(null);
   const [message, setMessage] = useState('');
   const [downloading, setDownloading] = useState(false);
-  const [model, setModel] = useState('llama3.1');
+  const [model, setModel] = useState('codellama:7b');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingFile, setPendingFile] = useState(null);
 
@@ -206,7 +206,7 @@ export default function App(){
           </button>
           <input
             type="text"
-            placeholder="ollama model (e.g. mistral:latest)"
+            placeholder="ollama model (e.g. codellama:7b)"
             value={model}
             onChange={(e)=> setModel(e.target.value)}
             style={{ padding:'10px 12px', borderRadius:6, border:'1px solid #ccc', background:'#fff', color:'#333', minWidth:260 }}

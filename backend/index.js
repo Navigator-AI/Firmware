@@ -8,6 +8,7 @@ const xml2js = require('xml2js');
 const archiver = require('archiver');
 const cors = require('cors');
 const { generateFromSpec } = require('./generator');
+const { TracebackSystem } = require('./traceback');
 const { spawn } = require('child_process');
 const pdfjsLib = (()=>{ try{ return require('pdfjs-dist'); }catch(_){ return null; } })();
 // Optional local LLM via Ollama (no cloud). If not installed, we fall back.
@@ -16,6 +17,7 @@ try { axios = require('axios'); } catch(_) { axios = null; }
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // For JSON body parsing
 const upload = multer({ dest: 'uploads/' });
 
 function cleanFile(filePath){
@@ -269,80 +271,15 @@ function extractRegsAndBases(text, nameHint){
   return spec;
 }
 
-// Local LLM extraction via Ollama
-async function extractWithOllama(pdfText, modelName, opts){
-  if(!axios) return null;
-  const model = modelName || 'mistral:latest';
-  const genUrl = 'http://127.0.0.1:11434/api/generate';
-  const chatUrl = 'http://127.0.0.1:11434/api/chat';
-  const prompt = `System: Embedded-firmware assistant. Output ONLY valid JSON.
-User: From this datasheet text, produce a JSON spec with optional base addresses and register offsets.
-{
-  "name": "<short>",
-  "peripherals": { "i2c": {"base":"0x<hex>"}, "spi": {"base":"0x<hex>"}, "uart": {"base":"0x<hex>"}, "gpio": {"pins": <num>, "base":"0x<hex>"} },
-  "registers": [ {"name":"CTRL","offset":"0x00"} ]
-}
-Text:\n"""
-${pdfText.slice(0, Math.min(pdfText.length, 20000))}
-"""`;
-  try{
-    // Attempt 1: generate with JSON mode
-    const resp = await axios.post(genUrl, {
-      model,
-      prompt,
-      stream: false,
-      format: 'json',
-      options: { temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.1, num_ctx: (opts && opts.num_ctx) ? opts.num_ctx : 8192 }
-    }, { timeout: 120000 });
-    const body = resp && resp.data && (resp.data.response || resp.data);
-    if(!body) return null;
-    if(typeof body === 'string'){
-      try { return JSON.parse(body); } catch(_){
-        const m = body.match(/\{[\s\S]*\}/m);
-        if(m){ try{ return JSON.parse(m[0]); }catch(_){ return null; } }
-        return null;
-      }
-    }
-    if(typeof body === 'object') return body;
-  }catch(e1){
-    try{
-      // Attempt 2: generate without format
-      const resp2 = await axios.post(genUrl, {
-        model,
-        prompt,
-        stream: false,
-        options: { temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.1, num_ctx: (opts && opts.num_ctx) ? opts.num_ctx : 8192 }
-      }, { timeout: 120000 });
-      const body2 = resp2 && resp2.data && (resp2.data.response || resp2.data);
-      if(typeof body2 === 'string'){
-        const m = body2.match(/\{[\s\S]*\}/m);
-        if(m){ try{ return JSON.parse(m[0]); }catch(_){ /* fallthrough */ } }
-      } else if(typeof body2 === 'object') {
-        return body2;
-      }
-    }catch(e2){ /* fallthrough */ }
-    try{
-      // Attempt 3: chat endpoint
-      const resp3 = await axios.post(chatUrl, {
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        stream: false
-      }, { timeout: 120000 });
-      const body3 = resp3 && resp3.data && (resp3.data.message && resp3.data.message.content);
-      if(typeof body3 === 'string'){
-        const m = body3.match(/\{[\s\S]*\}/m);
-        if(m){ try{ return JSON.parse(m[0]); }catch(_){ return null; } }
-      }
-    }catch(e3){ /* give up */ }
-    return null;
-  }
-}
+// [REMOVED DUPLICATE FUNCTION]
+
 
 // Attempt extraction via local Ollama without any external API
 async function extractWithOllama(pdfText, modelName, opts){
   if(!axios) return null;
-  // Default to a widely available local model name; allow override via query
-  const model = modelName || 'llama3.1';
+  // Default primary model and lightweight fallback for low-memory machines
+  const primaryModel = (modelName || 'codellama:7b').trim();
+  const fallbackModel = (process.env.OLLAMA_FALLBACK_MODEL || 'qwen2.5:1.5b').trim();
   const url = 'http://127.0.0.1:11434/api/generate';
   const prompt = `System: You are a meticulous embedded-firmware assistant. Extract structured data only.
 User: From the following PDF/datasheet text, extract a concise machine-readable spec describing peripherals and registers for driver generation. Respond with ONLY valid JSON matching this shape (no explanations, no prose, no comments):
@@ -361,29 +298,61 @@ User: From the following PDF/datasheet text, extract a concise machine-readable 
 Example JSON:
 {"name":"I2C-ADC","peripherals":{"i2c":{}},"registers":[{"name":"CTRL","offset":"0x00","fields":[{"name":"EN","bit":0,"width":1}]}]}
 Text:\n"""
-${pdfText.slice(0, Math.min(pdfText.length, 60000))}
+${pdfText.slice(0, Math.min(pdfText.length, 10000))}
 """`;
   try{
-    const resp = await axios.post(url, {
-      model,
-      prompt,
-      stream: false,
-      format: 'json',
-      options: { temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.1, num_ctx: (opts && opts.num_ctx) ? opts.num_ctx : 8192 }
-    }, { timeout: 20000 });
-    const body = resp && resp.data && (resp.data.response || resp.data);
-    if(!body) return null;
-    // Try to parse JSON from response
-    if(typeof body === 'string'){
-      try { return JSON.parse(body); } catch(_){}
-      const m = body.match(/\{[\s\S]*\}/m);
-      if(!m) return null;
-      try{ return JSON.parse(m[0]); }catch(_){ return null; }
+    const modelsToTry = [primaryModel];
+    if(fallbackModel && fallbackModel !== primaryModel){
+      modelsToTry.push(fallbackModel);
     }
-    if(typeof body === 'object') return body;
+
+    let lastErr = null;
+
+    for(const model of modelsToTry){
+      try{
+        console.log(`[LLM] Requesting extraction from model: ${model} (${Math.min(pdfText.length, 10000)} chars)`);
+        const resp = await axios.post(url, {
+          model,
+          prompt,
+          stream: false,
+          format: 'json',
+          options: {
+            temperature: (opts && typeof opts.temperature === 'number') ? opts.temperature : 0.1,
+            num_ctx: 8192
+          }
+        }, { timeout: 300000 }); // 5 minute timeout for slow machines
+
+        const body = resp && resp.data && (resp.data.response || resp.data);
+        if(!body) return null;
+        // Try to parse JSON from response
+        if(typeof body === 'string'){
+          try { return JSON.parse(body); } catch(_){}
+          const m = body.match(/\{[\s\S]*\}/m);
+          if(!m) return null;
+          try{ return JSON.parse(m[0]); }catch(_){ return null; }
+        }
+        if(typeof body === 'object') return body;
+        return null;
+      }catch(e){
+        lastErr = e;
+        const msg = (e && e.response && e.response.data && e.response.data.error) || (e && e.message) || '';
+        // If this is an out-of-memory error, and we have a fallback, try it
+        if(msg.toLowerCase().includes('requires more system memory') && model !== fallbackModel){
+          console.warn(`[LLM] Model "${model}" out of memory, falling back to "${fallbackModel}"`);
+          continue;
+        }
+        // For other errors, don't keep retrying
+        break;
+      }
+    }
+    // If we reach here, all models failed
+    if(lastErr){
+      console.warn('[LLM] Local extraction failed:', lastErr.message || lastErr);
+    }
     return null;
   }catch(e){
-    // Likely Ollama not running or model missing
+    // Likely Ollama not running or other fatal error
+    console.warn('[LLM] Local extraction fatal error:', e && (e.message || e));
     return null;
   }
 }
@@ -618,6 +587,49 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
     try { parsedSpec._text = textContent || ''; } catch(_) {}
     const generatedFiles = generateFromSpec(parsedSpec, tmpDir, {});
 
+    // Run traceback analysis automatically on every generation, with optional opt-out
+    let tracebackResults = null;
+    const disableTraceback = req.query && String(req.query.traceback || '').toLowerCase() === 'false';
+    if (!disableTraceback && generatedFiles.length > 0) {
+      try {
+        console.log('[TRACEBACK] Running error analysis on generated code...');
+        const traceback = new TracebackSystem({
+          // Allow turning off heavy checks via query if needed
+          useCompiler: !(req.query && req.query['no-compile'] === 'true'),
+          useStaticAnalysis: !(req.query && req.query['no-static'] === 'true'),
+          // Use AI only if axios/Ollama are available and user didn't disable it
+          useAI: !(req.query && req.query['no-ai'] === 'true') && axios !== null,
+          aiModel: (req.query && req.query.model) || 'codellama:7b',
+          // Always attempt to auto-fix before returning files
+          autoFix: true,
+          verbose: true
+        });
+
+        // Analyze generated code
+        tracebackResults = await traceback.analyzeCode(tmpDir, generatedFiles);
+
+        // Get AI fixes if errors found
+        if (tracebackResults.errors.length > 0 && axios && !(req.query && req.query['no-ai'] === 'true')) {
+          console.log('[TRACEBACK] Requesting AI fixes...');
+          const fullPaths = generatedFiles.map(f => path.join(tmpDir, f));
+          await traceback.getAIFixes(tracebackResults.errors, fullPaths);
+          tracebackResults.fixes = traceback.fixes;
+
+          // Apply fixes directly to generated files
+          if (traceback.fixes && traceback.fixes.length > 0) {
+            console.log('[TRACEBACK] Applying fixes to generated files...');
+            const applied = await traceback.applyFixes(tmpDir, traceback.fixes);
+            tracebackResults.appliedFixes = applied;
+          }
+        }
+
+        console.log(`[TRACEBACK] Found ${tracebackResults.errors.length} errors, ${tracebackResults.warnings.length} warnings`);
+      } catch (tracebackErr) {
+        console.warn('[TRACEBACK] Analysis failed:', tracebackErr.message);
+        tracebackResults = { error: tracebackErr.message };
+      }
+    }
+
     // If client requests JSON, return generated files inline for preview
     if ((req.query && req.query.format === 'json')){
       const filesPayload = generatedFiles.map((fname) => {
@@ -630,6 +642,9 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
       // Cleanup tmp in background
       setTimeout(() => { try{ fs.rmSync(tmpDir, { recursive: true, force: true }); }catch(e){} }, 1000 * 10);
       const meta = req._genMeta || {};
+      if (tracebackResults) {
+        meta.traceback = tracebackResults;
+      }
       return res.status(200).json({ files: filesPayload, meta });
     }
 
@@ -673,6 +688,48 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
     console.error(err);
     cleanFile(file.path);
     return res.status(500).json({ error: 'Server error: ' + (err.message||err) });
+  }
+});
+
+// Traceback API endpoint - analyze code directory
+app.post('/traceback', express.json(), async (req, res) => {
+  const { codeDir, options = {} } = req.body;
+  
+  if (!codeDir || !fs.existsSync(codeDir)) {
+    return res.status(400).json({ error: 'Invalid code directory' });
+  }
+
+  try {
+    const traceback = new TracebackSystem({
+      useCompiler: options.useCompiler !== false,
+      useStaticAnalysis: options.useStaticAnalysis !== false,
+      useAI: options.useAI !== false && axios !== null,
+      aiModel: options.aiModel || 'codellama:7b',
+      autoFix: options.autoFix || false,
+      verbose: options.verbose || false
+    });
+
+    const results = await traceback.analyzeCode(codeDir);
+
+    // Get AI fixes if enabled
+    if (options.useAI !== false && results.errors.length > 0 && axios) {
+      const files = fs.readdirSync(codeDir)
+        .filter(f => f.endsWith('.c') || f.endsWith('.h') || f.endsWith('.cpp'))
+        .map(f => path.join(codeDir, f));
+      await traceback.getAIFixes(results.errors, files);
+      results.fixes = traceback.fixes;
+    }
+
+    // Apply fixes if requested
+    if (options.autoFix && results.fixes.length > 0) {
+      const applied = await traceback.applyFixes(codeDir, results.fixes);
+      results.appliedFixes = applied;
+    }
+
+    res.json(results);
+  } catch (err) {
+    console.error('[TRACEBACK] API error:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 

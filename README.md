@@ -7,14 +7,15 @@ A complete end-to-end system that automatically generates firmware drivers from 
 1. [Overview](#overview)
 2. [Architecture](#architecture)
 3. [Installation & Setup](#installation--setup)
-4. [How It Works](#how-it-works)
-5. [API Documentation](#api-documentation)
-6. [Frontend Guide](#frontend-guide)
-7. [Backend Guide](#backend-guide)
-8. [Code Generation Process](#code-generation-process)
-9. [Configuration](#configuration)
-10. [Troubleshooting](#troubleshooting)
-11. [Development](#development)
+4. [Project Dependencies](#-project-dependencies)
+5. [How It Works](#how-it-works)
+6. [API Documentation](#api-documentation)
+7. [Frontend Guide](#frontend-guide)
+8. [Backend Guide](#backend-guide)
+9. [Code Generation Process](#code-generation-process)
+10. [Configuration](#configuration)
+11. [Troubleshooting](#troubleshooting)
+12. [Development](#development)
 
 ## 🎯 Overview
 
@@ -22,11 +23,11 @@ This system takes a datasheet PDF as input and automatically generates complete 
 
 ### LLM Configuration
 
-**Primary LLM**: **Llama 3.1** (via Ollama)
+**Primary LLM**: **Code Llama 7B** (via Ollama) for higher code accuracy
 
-- **Default Model**: `llama3.1`
+- **Default Model**: `codellama:7b`
 - **LLM Framework**: [Ollama](https://ollama.ai/) (local, privacy-preserving)
-- **Alternative Models**: Any Ollama-compatible model (e.g., `mistral:latest`, `llama3`, `codellama`, etc.)
+- **Alternative Models**: Any Ollama-compatible model (e.g., `mistral:latest`, `llama3`, `codellama:13b`, etc.)
 - **Model Selection**: Configurable via frontend UI or API query parameter
 - **Context Window**: 8192 tokens (configurable)
 - **Temperature**: 0.1 (low temperature for structured extraction)
@@ -35,7 +36,7 @@ The system uses direct LLM prompting (not RAG) - the PDF text is sent directly t
 
 ### Key Features
 - **PDF Text Extraction**: Extracts text from datasheet PDFs
-- **AI-Powered Analysis**: Uses local LLM (Ollama with Llama 3.1) for intelligent extraction
+- **AI-Powered Analysis**: Uses local LLM (Ollama with Code Llama 7B) for intelligent extraction
 - **Pattern Recognition**: Regex-based extraction of registers and peripherals
 - **Code Generation**: Creates complete C drivers with proper structure
 - **Single File Output**: Consolidates all code into one downloadable file
@@ -50,7 +51,7 @@ The system uses direct LLM prompting (not RAG) - the PDF text is sent directly t
 │                 │    │                 │    │                 │
 │ • File Upload   │    │ • PDF Processing│    │ • Code Templates│
 │ • Code Preview  │    │ • AI Analysis   │    │ • Register Maps │
-│ • Download ZIP  │    │ • File Generation│   │ • Driver Logic  │
+│ • Download ZIP  │    │ • FileGeneration│    │ • Driver Logic  │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
@@ -110,8 +111,8 @@ pip install -r requirements.txt
 # Install Ollama
 curl -fsSL https://ollama.ai/install.sh | sh
 
-# Pull a model
-ollama pull llama3.1
+# Pull Code Llama 7B for better code accuracy
+ollama pull codellama:7b
 ```
 
 ### Step 6: Start the Application
@@ -151,6 +152,202 @@ The application will be available at:
 - Frontend: http://localhost:3000
 - Backend: http://localhost:5000
 
+## 📦 Project Dependencies
+
+This section explains what each dependency does in the codebase and where it's used.
+
+### Backend Dependencies
+
+#### 1. **archiver** (v5.3.1)
+- **Purpose**: Creates ZIP archives of generated firmware files
+- **Where Used**: `backend/index.js` (lines 8, 638-663)
+- **What It Does**:
+  - Creates a ZIP stream from multiple generated C files
+  - Streams the ZIP directly to the HTTP response for download
+  - Used when users download generated code (default response format)
+  - Code example:
+    ```javascript
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    archive.pipe(res);  // Streams zip to HTTP response
+    archive.file(fpath, { name: path.basename(f) });  // Adds each file
+    archive.finalize();  // Completes the zip
+    ```
+
+#### 2. **express** (v4.18.2)
+- **Purpose**: Web server framework for Node.js
+- **Where Used**: `backend/index.js` (lines 1, 17, 391, 679)
+- **What It Does**:
+  - Creates the Express application instance (`const app = express()`)
+  - Handles the `/upload` POST endpoint for file uploads
+  - Listens on port 5000 for incoming requests
+  - Provides routing and middleware functionality
+  - Code: `app.post('/upload', ...)` defines the upload route
+
+#### 3. **multer** (v1.4.5-lts.2)
+- **Purpose**: Handles multipart/form-data file uploads
+- **Where Used**: `backend/index.js` (lines 2, 19, 391)
+- **What It Does**:
+  - Processes file uploads from the frontend FormData
+  - Saves uploaded files temporarily to `uploads/` directory
+  - Provides `req.file` object with file metadata (name, path, size)
+  - Code: `upload.single('datasheet')` middleware handles the file upload field
+
+#### 4. **pdf-parse** (v1.1.1)
+- **Purpose**: Extracts text content from PDF files
+- **Where Used**: `backend/index.js` (lines 5, 402)
+- **What It Does**:
+  - Primary method for PDF text extraction from uploaded datasheets
+  - Parses PDF buffer and extracts readable text content
+  - Used to analyze PDF content for register and peripheral information
+  - Code: `data = await pdf(dataBuffer)` extracts text from PDF buffer
+
+#### 5. **js-yaml** (v4.1.0)
+- **Purpose**: Parses YAML configuration files
+- **Where Used**: `backend/index.js` (lines 6, 48, 584)
+- **What It Does**:
+  - Parses YAML/yml spec files uploaded by users
+  - Also attempts YAML extraction from PDF text content
+  - Converts YAML format to JavaScript objects
+  - Code: `yaml.load(textContent)` converts YAML to JavaScript objects
+
+#### 6. **xml2js** (v0.4.23)
+- **Purpose**: Parses XML files and converts them to JavaScript objects
+- **Where Used**: `backend/index.js` (lines 7, 54, 586-588)
+- **What It Does**:
+  - Parses XML spec files uploaded by users
+  - Attempts XML extraction from PDF text content
+  - Converts XML structure to JavaScript objects for processing
+  - Code: `xml2js.parseString(textContent, ...)` parses XML asynchronously
+
+#### 7. **cors** (v2.8.5)
+- **Purpose**: Enables Cross-Origin Resource Sharing (CORS)
+- **Where Used**: `backend/index.js` (lines 9, 18)
+- **What It Does**:
+  - Allows the frontend (running on port 4000/3000) to make requests to the backend (port 5000)
+  - Prevents CORS browser security errors
+  - Enables cross-origin requests from the React frontend
+  - Code: `app.use(cors())` enables CORS for all routes
+
+#### 8. **axios** (v1.6.8) - *Also used in backend*
+- **Purpose**: HTTP client for making API requests
+- **Where Used**: `backend/index.js` (line 15, 290-337)
+- **What It Does**:
+  - Makes HTTP POST requests to local Ollama LLM service
+  - Sends PDF text to Ollama for AI-powered extraction
+  - Handles responses from Ollama API at `http://127.0.0.1:11434`
+  - Code: `axios.post('http://127.0.0.1:11434/api/generate', {...})`
+
+#### 9. **pdfjs-dist** (v4.7.76) - *Additional backend dependency*
+- **Purpose**: Alternative PDF text extraction library
+- **Where Used**: `backend/index.js` (lines 12, 406-421)
+- **What It Does**:
+  - Fallback method when `pdf-parse` fails to extract text
+  - More robust PDF parsing for complex PDFs
+  - Extracts text from all pages of the PDF
+  - Code: `pdfjsLib.getDocument({ data: dataBuffer })` loads PDF for text extraction
+
+### Frontend Dependencies
+
+#### 10. **axios** (v1.4.0)
+- **Purpose**: HTTP client for making API requests from the browser
+- **Where Used**: `frontend/src/app.jsx` (lines 6, 45)
+- **What It Does**:
+  - Sends POST requests to the backend `/upload` endpoint
+  - Handles file uploads with FormData
+  - Manages response and error handling
+  - Code: `axios.post('http://localhost:5000/upload?...', fd, {...})`
+
+#### 11. **highlight.js** (v11.9.0)
+- **Purpose**: Syntax highlighting for code preview
+- **Where Used**: `frontend/src/app.jsx` (lines 2-5, 247)
+- **What It Does**:
+  - Highlights generated C code in the preview panel
+  - Registers C language support for syntax highlighting
+  - Applies color coding to make code more readable
+  - Code: `hljs.highlight(f.content, {language:'c'})` highlights C code
+
+#### 12. **jszip** (v3.10.1)
+- **Purpose**: Creates ZIP files in the browser
+- **Where Used**: `frontend/src/app.jsx` (lines 164-181)
+- **What It Does**:
+  - Creates ZIP files client-side for download
+  - Consolidates all generated files into a single ZIP archive
+  - Used when downloading from the preview panel
+  - Code: Creates JSZip instance, adds files, generates blob for download
+
+#### 13. **react** (v18.2.0)
+- **Purpose**: JavaScript library for building user interfaces
+- **Where Used**: `frontend/src/app.jsx`, `frontend/src/index.jsx`
+- **What It Does**:
+  - Builds the entire frontend UI components
+  - Manages component state (file, model, preview, messages)
+  - Handles user interactions and UI updates
+  - Code: `import React, {useState, useEffect} from 'react'`
+
+#### 14. **react-dom** (v18.2.0)
+- **Purpose**: React package for DOM rendering
+- **Where Used**: `frontend/src/index.jsx` (line 2)
+- **What It Does**:
+  - Renders React components to the browser DOM
+  - Provides the `createRoot` API for React 18
+  - Code: `createRoot(...).render(<App />)` mounts the app to DOM
+
+### Frontend Dev Dependencies
+
+#### 15. **buffer** (v6.0.3)
+- **Purpose**: Node.js Buffer polyfill for browser environments
+- **Where Used**: Used by Parcel bundler and other build tools
+- **What It Does**:
+  - Provides Node.js Buffer API in browser environments
+  - Required by some npm packages that expect Node.js APIs
+  - Enables compatibility between Node.js and browser code
+
+#### 16. **parcel** (v2.9.3)
+- **Purpose**: Web application bundler and development server
+- **Where Used**: `frontend/package.json` scripts
+- **What It Does**:
+  - Bundles React application for production
+  - Serves development server on port 4000
+  - Handles hot module replacement (HMR) for development
+  - Code: `parcel src/index.html --port 4000` starts dev server
+
+#### 17. **process** (v0.11.10)
+- **Purpose**: Node.js process polyfill for browser environments
+- **Where Used**: Used by Parcel and other build tools
+- **What It Does**:
+  - Provides `process.env` and other Node.js process APIs in browser
+  - Required by some npm packages that expect Node.js environment
+  - Enables environment variable access in browser code
+
+### Dependency Summary
+
+**Backend Core:**
+- `express` - Web server
+- `multer` - File upload handling
+- `cors` - Cross-origin requests
+
+**File Processing:**
+- `pdf-parse` - Primary PDF text extraction
+- `pdfjs-dist` - Fallback PDF extraction
+- `js-yaml` - YAML parsing
+- `xml2js` - XML parsing
+
+**Output Generation:**
+- `archiver` - ZIP file creation
+
+**AI Integration:**
+- `axios` - HTTP client for Ollama API
+
+**Frontend Core:**
+- `react` + `react-dom` - UI framework
+- `axios` - HTTP client
+- `highlight.js` - Code syntax highlighting
+- `jszip` - Client-side ZIP creation
+
+**Development Tools:**
+- `parcel` - Build tool and dev server
+- `buffer` + `process` - Browser polyfills
+
 ## 🔄 How It Works
 
 ### 1. PDF Upload & Processing
@@ -186,7 +383,7 @@ Uploads a datasheet PDF and generates firmware code.
 
 **Query Parameters:**
 - `llm` (optional): Enable AI analysis ("ollama")
-- `model` (optional): Ollama model name (default: "llama3.1")
+- `model` (optional): Ollama model name (default: "codellama:7b")
 - `format` (optional): Response format ("json" for preview, default: ZIP)
 - `ctx` (optional): Context window size for AI
 - `temperature` (optional): AI temperature setting
@@ -200,7 +397,7 @@ Uploads a datasheet PDF and generates firmware code.
 const formData = new FormData();
 formData.append('datasheet', pdfFile);
 
-fetch('http://localhost:5000/upload?llm=ollama&model=llama3.1', {
+fetch('http://localhost:5000/upload?llm=ollama&model=codellama:7b', {
   method: 'POST',
   body: formData
 })
@@ -237,7 +434,7 @@ Main React component handling:
 const [file, setFile] = useState(null);           // Selected file
 const [message, setMessage] = useState('');       // Status messages
 const [downloading, setDownloading] = useState(false); // Loading state
-const [model, setModel] = useState('llama3.1');   // AI model
+const [model, setModel] = useState('codellama:7b');   // AI model
 const [preview, setPreview] = useState(null);     // Generated code preview
 ```
 
@@ -357,7 +554,7 @@ async function extractWithOllama(pdfText, modelName, opts) {
   }`;
   
   const response = await axios.post('http://127.0.0.1:11434/api/generate', {
-    model: modelName || 'llama3.1',
+    model: modelName || 'codellama:7b',
     prompt: prompt,
     format: 'json'
   });
@@ -560,7 +757,7 @@ int main(void) {
 PYTHON=python3
 
 # Optional: Ollama model
-OLLAMA_MODEL=llama3.1
+OLLAMA_MODEL=codellama:7b
 
 # Optional: Server port
 PORT=5000
@@ -569,7 +766,7 @@ PORT=5000
 ### Frontend Configuration
 ```javascript
 // In app.jsx
-const DEFAULT_MODEL = 'llama3.1';
+const DEFAULT_MODEL = 'codellama:7b';
 const BACKEND_URL = 'http://localhost:5000';
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 ```
@@ -582,6 +779,203 @@ const TMP_DIR = 'tmp/';
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const SUPPORTED_FORMATS = ['.pdf', '.json', '.yaml', '.xml'];
 ```
+
+## 🔍 Traceback System
+
+The traceback system automatically detects and fixes errors in generated firmware code. It provides both a CLI tool and API integration.
+
+### Features
+
+- **Compilation Error Detection**: Attempts to compile code and catches compilation errors
+- **Static Analysis**: Uses cppcheck and clang-tidy for code quality checks
+- **Syntax Validation**: Detects common syntax errors (missing semicolons, unclosed brackets, etc.)
+- **AI-Powered Fixes**: Uses Ollama LLM to suggest automatic fixes for errors
+- **Code Quality Checks**: Identifies potential issues like uninitialized variables
+
+### CLI Usage
+
+```bash
+# Basic analysis
+node backend/traceback-cli.js <code-directory>
+
+# With automatic fixes
+node backend/traceback-cli.js <code-directory> --fix
+
+# Skip compilation checks (faster)
+node backend/traceback-cli.js <code-directory> --no-compile
+
+# Skip static analysis
+node backend/traceback-cli.js <code-directory> --no-static
+
+# Skip AI fixes
+node backend/traceback-cli.js <code-directory> --no-ai
+
+# Use specific AI model
+node backend/traceback-cli.js <code-directory> --model codellama:13b
+
+# Verbose output
+node backend/traceback-cli.js <code-directory> --verbose
+```
+
+### Using npm script
+
+```bash
+npm run traceback <code-directory> [options]
+```
+
+### Example Output
+
+```
+🔍 Starting traceback analysis...
+
+📁 Analyzing: /path/to/generated/code
+⚙️  Options: { autoFix: false, useCompiler: true, ... }
+
+================================================================================
+🔍 TRACEBACK ANALYSIS REPORT
+================================================================================
+
+❌ ERRORS (2):
+--------------------------------------------------------------------------------
+
+[1] gpio.c:15:5
+    Type: compilation
+    Message: 'GPIO_BASE' undeclared (first use in this function)
+    Code: static volatile uint32_t *GPIO_DIR = (uint32_t*)(GPIO_BASE + 0x00);
+
+[2] uart.c:23:10
+    Type: syntax
+    Message: Missing semicolon or closing brace
+    Code: void uart_init(void) {
+
+⚠️  WARNINGS (1):
+--------------------------------------------------------------------------------
+
+[1] gpio.c:8:3
+    Type: quality
+    Message: Potentially uninitialized variable
+    Code: uint32_t pin;
+
+🔧 FIX SUGGESTIONS (2):
+--------------------------------------------------------------------------------
+
+[1] gpio.c:15
+    Error: 'GPIO_BASE' undeclared
+    Suggested Fix:
+    #define GPIO_BASE 0x40010000
+    static volatile uint32_t *GPIO_DIR = (uint32_t*)(GPIO_BASE + 0x00);
+
+================================================================================
+Summary: 2 errors, 1 warnings
+================================================================================
+```
+
+### API Integration
+
+#### Enable traceback in upload endpoint
+
+Add `traceback=true` query parameter:
+
+```bash
+curl -X POST "http://localhost:5000/upload?traceback=true&format=json" \
+  -F "datasheet=@datasheet.pdf"
+```
+
+The response will include traceback results in the `meta.traceback` field:
+
+```json
+{
+  "files": [...],
+  "meta": {
+    "traceback": {
+      "errors": [...],
+      "warnings": [...],
+      "fixes": [...],
+      "summary": {
+        "totalErrors": 2,
+        "totalWarnings": 1
+      }
+    }
+  }
+}
+```
+
+#### Dedicated traceback endpoint
+
+```bash
+# Analyze a code directory
+curl -X POST http://localhost:5000/traceback \
+  -H "Content-Type: application/json" \
+  -d '{
+    "codeDir": "/path/to/code",
+    "options": {
+      "useCompiler": true,
+      "useStaticAnalysis": true,
+      "useAI": true,
+      "autoFix": false,
+      "aiModel": "codellama:7b"
+    }
+  }'
+```
+
+### Automatic Fix Application
+
+To automatically apply fixes:
+
+```bash
+# CLI
+node backend/traceback-cli.js <code-directory> --fix
+
+# API
+curl -X POST http://localhost:5000/traceback \
+  -H "Content-Type: application/json" \
+  -d '{
+    "codeDir": "/path/to/code",
+    "options": {
+      "autoFix": true,
+      "useAI": true
+    }
+  }'
+```
+
+### Prerequisites
+
+For full functionality, install optional tools:
+
+```bash
+# GCC compiler (for compilation checks)
+# Windows: Install MinGW or use WSL
+# Linux: sudo apt-get install gcc
+# Mac: xcode-select --install
+
+# cppcheck (for static analysis)
+# Windows: choco install cppcheck
+# Linux: sudo apt-get install cppcheck
+# Mac: brew install cppcheck
+
+# clang-tidy (optional, for advanced static analysis)
+# Windows: choco install llvm
+# Linux: sudo apt-get install clang-tidy
+# Mac: brew install llvm
+```
+
+**Note**: The traceback system works without these tools, but with reduced functionality. It will skip checks that require unavailable tools.
+
+### Integration in Code Generation
+
+The traceback system is automatically integrated into the code generation flow. When you upload a datasheet with `traceback=true`, it will:
+
+1. Generate firmware code as usual
+2. Run traceback analysis on generated files
+3. Request AI fixes for any errors found
+4. Include results in the response
+
+### Error Types
+
+- **syntax**: Basic syntax errors (missing semicolons, unclosed brackets)
+- **compilation**: Compilation errors (undeclared variables, type mismatches)
+- **static_analysis**: Issues found by static analysis tools
+- **quality**: Code quality warnings (uninitialized variables, potential bugs)
 
 ## 🐛 Troubleshooting
 
@@ -605,7 +999,7 @@ curl http://127.0.0.1:11434/api/tags
 ollama serve
 
 # Pull required model
-ollama pull llama3.1
+ollama pull codellama:7b
 ```
 
 #### 3. File Upload Issues
