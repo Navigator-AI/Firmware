@@ -610,16 +610,22 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
 
         // Get AI fixes if errors found
         if (tracebackResults.errors.length > 0 && axios && !(req.query && req.query['no-ai'] === 'true')) {
-          console.log('[TRACEBACK] Requesting AI fixes...');
-          const fullPaths = generatedFiles.map(f => path.join(tmpDir, f));
-          await traceback.getAIFixes(tracebackResults.errors, fullPaths);
-          tracebackResults.fixes = traceback.fixes;
+          try {
+            console.log('[TRACEBACK] Requesting AI fixes...');
+            const fullPaths = generatedFiles.map(f => path.join(tmpDir, f));
+            await traceback.getAIFixes(tracebackResults.errors, fullPaths);
+            tracebackResults.fixes = traceback.fixes;
 
-          // Apply fixes directly to generated files
-          if (traceback.fixes && traceback.fixes.length > 0) {
-            console.log('[TRACEBACK] Applying fixes to generated files...');
-            const applied = await traceback.applyFixes(tmpDir, traceback.fixes);
-            tracebackResults.appliedFixes = applied;
+            // Apply fixes directly to generated files
+            if (traceback.fixes && traceback.fixes.length > 0) {
+              console.log('[TRACEBACK] Applying fixes to generated files...');
+              const applied = await traceback.applyFixes(tmpDir, traceback.fixes);
+              tracebackResults.appliedFixes = applied;
+            }
+          } catch (aiFixErr) {
+            // Don't fail generation if AI fixes timeout or fail
+            console.warn('[TRACEBACK] AI fixes failed (non-fatal):', aiFixErr.message);
+            tracebackResults.aiFixError = aiFixErr.message;
           }
         }
 

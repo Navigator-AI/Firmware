@@ -438,7 +438,7 @@ Provide ONLY the corrected code for the problematic line(s). No explanations.`;
                 // Do NOT request JSON mode here; some models 500 on format:'json'
             options: { temperature: 0.1, num_ctx: 4096 }
           },
-          { timeout: 60000 } // Increased to 60s
+          { timeout: 180000 } // Increased to 180s (3 minutes) for slow models
         );
 
             const body = response?.data?.response || response?.data;
@@ -495,15 +495,37 @@ Provide ONLY the corrected code for the problematic line(s). No explanations.`;
               continue;
             }
 
+            // If timeout and we have a fallback model, try the next model
+            if ((innerErr.code === 'ECONNABORTED' || msg.includes('timeout')) && model !== fallbackModel && fallbackModel) {
+              if (this.options.verbose) {
+                console.warn(
+                  `[TRACEBACK] Model "${model}" timed out, falling back to "${fallbackModel}"`
+                );
+              }
+              continue;
+            }
+
             // For other errors, don't keep trying models
             throw innerErr;
           }
         }
 
       } catch (err) {
+        const errMsg = err.message || '';
+        // Handle timeout gracefully - skip this error but continue with others
+        if (err.code === 'ECONNABORTED' || errMsg.includes('timeout')) {
+          if (this.options.verbose) {
+            console.warn(
+              `[TRACEBACK] AI fix timed out for ${error.file}:${error.line}, skipping...`
+            );
+          }
+          // Continue to next error instead of breaking
+          continue;
+        }
+        
         if (this.options.verbose) {
           console.warn(
-            `[TRACEBACK] AI fix failed for ${error.file}:${error.line}: ${err.message}`
+            `[TRACEBACK] AI fix failed for ${error.file}:${error.line}: ${errMsg}`
           );
         }
         // On first hard failure (e.g. HTTP 500), stop trying further errors this run
