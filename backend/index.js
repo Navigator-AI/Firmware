@@ -589,17 +589,18 @@ app.post('/upload', upload.single('datasheet'), async (req, res) => {
 
     // Run traceback analysis automatically on every generation, with optional opt-out
     let tracebackResults = null;
+    // Run traceback + AI fixes by default (original behavior), but use a smaller model for speed.
     const disableTraceback = req.query && String(req.query.traceback || '').toLowerCase() === 'false';
     if (!disableTraceback && generatedFiles.length > 0) {
       try {
         console.log('[TRACEBACK] Running error analysis on generated code...');
         const traceback = new TracebackSystem({
-          // Allow turning off heavy checks via query if needed
+          // Keep compiler + static analysis on by default (can be disabled via no-compile/no-static)
           useCompiler: !(req.query && req.query['no-compile'] === 'true'),
           useStaticAnalysis: !(req.query && req.query['no-static'] === 'true'),
-          // Use AI only if axios/Ollama are available and user didn't disable it
+          // Always attempt AI fixes unless explicitly disabled, but use a lightweight model
           useAI: !(req.query && req.query['no-ai'] === 'true') && axios !== null,
-          aiModel: (req.query && req.query.model) || 'codellama:7b',
+          aiModel: (req.query && req.query.model) || 'qwen2.5:1.5b',
           // Always attempt to auto-fix before returning files
           autoFix: true,
           verbose: true

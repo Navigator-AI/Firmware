@@ -10,7 +10,6 @@ export default function App(){
   const fileInputRef = useRef(null);
   const [message, setMessage] = useState('');
   const [downloading, setDownloading] = useState(false);
-  const [model, setModel] = useState('codellama:7b');
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingFile, setPendingFile] = useState(null);
 
@@ -41,7 +40,8 @@ export default function App(){
       setDownloading(true);
       setMessage('Uploading and generating...');
       setPreview(null); // ensure old results are cleared on new upload
-      const qs = `format=json&llm=ollama${model ? `&model=${encodeURIComponent(model)}` : ''}`;
+      // Default: run full pipeline (including traceback + AI fixes) using backend defaults.
+      const qs = `format=json&llm=ollama`;
       const resp = await axios.post(`http://localhost:5000/upload?${qs}`, fd, {
         responseType: 'json',
         headers: { 'Content-Type': 'multipart/form-data' },
@@ -64,7 +64,7 @@ export default function App(){
       // Preview files if available
       if(resp.data && resp.data.files){
         const meta = resp.data.meta || {};
-        const via = meta.source === 'llm' ? ` via LLM (${meta.model||model||'ollama'})` : '';
+        const via = meta.source === 'llm' ? ` via LLM (${meta.model || 'ollama'})` : '';
         setMessage(`Generated files ready${via}.`);
         setPreview(resp.data.files);
         setDownloading(false);
@@ -197,21 +197,12 @@ export default function App(){
       </div>
       <div style={{maxWidth:800, margin:'0 auto', textAlign:'center', position:'relative', zIndex:2}}>
         <h2>Embedd - Firmware Code Generator</h2>
-        <p>Upload a datasheet PDF. The app validates keywords and generates skeletal drivers.</p>
 
         <input ref={fileInputRef} type="file" onChange={onFileChange} style={{ display:'none' }} />
         <div style={{margin:'12px', display:'flex', gap:12, justifyContent:'center'}}>
           <button onClick={() => fileInputRef.current && fileInputRef.current.click()} style={{padding:'10px 20px', background:'#6b46c1', color:'#fff', border:'none', borderRadius:6}} disabled={downloading}>
             {downloading ? 'Working...' : 'Upload Datasheet'}
           </button>
-          <input
-            type="text"
-            placeholder="ollama model (e.g. codellama:7b)"
-            value={model}
-            onChange={(e)=> setModel(e.target.value)}
-            style={{ padding:'10px 12px', borderRadius:6, border:'1px solid #ccc', background:'#fff', color:'#333', minWidth:260 }}
-            disabled={downloading}
-          />
           {/* demo dropdown removed: generation is now automatic based on parsed peripherals */}
         </div>
 

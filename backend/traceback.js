@@ -21,8 +21,9 @@ class TracebackSystem {
       useCompiler: options.useCompiler !== false, // Try to compile code
       useStaticAnalysis: options.useStaticAnalysis !== false, // Use cppcheck/clang-tidy
       useAI: options.useAI !== false, // Use Ollama for fixes
-      aiModel: options.aiModel || 'codellama:7b',
-      // Fallback model if primary runs out of memory on some machines
+      // Default to a lightweight model to avoid OOM / long stalls
+      aiModel: options.aiModel || 'qwen2.5:1.5b',
+      // Use the same small model as fallback to avoid trying heavy models
       fallbackModel: options.fallbackModel || 'qwen2.5:1.5b',
       compiler: options.compiler || 'gcc', // gcc, clang, or arduino-cli
       verbose: options.verbose || false,
@@ -403,7 +404,7 @@ class TracebackSystem {
     }
 
     const fixes = [];
-    const primaryModel = this.options.aiModel || 'codellama:7b';
+    const primaryModel = this.options.aiModel || 'qwen2.5:1.5b';
     const fallbackModel = this.options.fallbackModel || null;
     const url = 'http://127.0.0.1:11434/api/generate';
 
@@ -436,10 +437,11 @@ Provide ONLY the corrected code for the problematic line(s). No explanations.`;
                 prompt,
                 stream: false,
                 // Do NOT request JSON mode here; some models 500 on format:'json'
-            options: { temperature: 0.1, num_ctx: 4096 }
-          },
-          { timeout: 180000 } // Increased to 180s (3 minutes) for slow models
-        );
+                options: { temperature: 0.1, num_ctx: 4096 }
+              },
+              // Reduce timeout so a stuck model doesn't block the whole response for too long
+              { timeout: 60000 } // 60s per error/model
+            );
 
             const body = response?.data?.response || response?.data;
 
